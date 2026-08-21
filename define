@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Make variables to easily format text in terminal.
+BOLD=$(tput bold)
+NORMAL=$(tput sgr0)
+
+# Get WORD from standard input if it exists, otherwise look up "nothing".
+WORD=${*:-"nothing"}
+
+# Fix WORD if it contains spaces so the API search works correctly (it's a URL).
+LOOKUP_WORD=${WORD// /%20}
+
+IFS=$'\n\t'
+
+# Query the dictionary API for the WORD and save its JSON output into API_QUERY.
+API_QUERY=$(curl -fsS "https://freedictionaryapi.com/api/v1/entries/en/$LOOKUP_WORD")
+
+columns="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+
+# Parse and validate the API response, then print the formatted output.
+if ! DEFINITION=$(jq -r '
+  if has("entries") and (.entries | length > 0) then
+    .entries
+    | group_by(.partOfSpeech)
+    | sort_by(length)
+    | reverse
+    | .[] as $group
+    | $group[0].partOfSpeech as $pos
+    | "POS\t\($pos)",
+      (
+        [ $group[] | .senses[] ]
+        | to_entries[]
+        | "DEF\t\(.key + 1)\t\(.value.definition)",
+          (.value.subsenses[]? | "SUB\t\(.definition)")
+      )
+  else
+    empty
+  end
+' <<< "$API_QUERY"); then
+    echo "No dictionary entry found for ${BOLD}${WORD}${NORMAL}"
+    exit 1
+fi
+
+if [[ -z "$DEFINITION" ]]; then
+    echo "No dictionary entry found for ${BOLD}${WORD}${NORMAL}"
+    exit 1
+fi
+
+echo "${BOLD}${WORD}${NORMAL}"
+
+while IFS=$'\t' read -r type a b
+do
+    case "$type" in
+
+        POS)
+            printf "\n%s\n\n" "${a^}"
+            ;;
+
+        DEF)
+	    def="$b"
+   
+	    printf -v prefix "%2d. " "$a"
+
+	    fold -s -w "$(( columns - ${#prefix} ))" <<< "$def" |
+	    sed "1s/^/$prefix/; 2,\$s/^/    /"
+	    ;;
+
+        SUB)
+            fold -s -w "$(( columns - 6 ))" <<< "$a" |
+	    sed '1s/^/     • /; 2,$s/^/       /'
+	    ;;
+
+    esac
+done <<< "${DEFINITION}"
